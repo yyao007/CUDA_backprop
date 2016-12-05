@@ -39,6 +39,7 @@ char *filename;
 backprop_face()
 {
   BPNN *net;
+  Timer timer;
   int i;
   float out_err, hid_err;
   net = bpnn_create(layer_size, 16, 1); // (16, 1 can not be changed)
@@ -46,7 +47,9 @@ backprop_face()
   load(net);
   //entering the training kernel, only one iteration
   printf("Starting training kernel\n");
+  startTime(&timer);
   bpnn_train_kernel(net, &out_err, &hid_err);
+  stopTime(&timer); printf("%f s\n", elapsedTime(timer));
   bpnn_save_dbg(net, "out.txt");
   bpnn_free(net);
   printf("Training done\n");

@@ -1,10 +1,15 @@
+#include "support.h"
+
 #define BLOCK_SIZE 512
 #define GRID_SIZE 512
 
 
+__device__ float ABS(float x) {
+	return ((x > 0.0)? x : -x);
+}        
+
 /*** The squashing function.  Currently, it's a sigmoid. ***/
-__device__ float squash(float x)
-{
+__device__ float squash(float x) {
   return (1.0 / (1.0 + exp(-x)));
 }
 
@@ -35,53 +40,148 @@ __global__ void bpnn_layerforward_kernel(float *l1, float *l2, float *w, float *
 			__syncthreads();
 
 			// multiply private_w and private_l1
-			private_w[t] *= l1[t];
-			private_w[t+blockDim.x] *= l1[t+blockDim.x];
+			private_w[t] *= private_l1[t];
+			private_w[t+blockDim.x] *= private_l1[t+blockDim.x];
 			__syncthreads();
 
-			int size = n1;
-			int block = 1;
-    		while (true) {
-    			// reduction part
-				for (int rstride = blockDim.x; rstride > 0; rstride >>= 1) {
-			    	if (t < rstride) {
-			    		private_w[t] += private_w[t+rstride];
-			    	}
-			    	__syncthreads();
-	    		}
-
-				if (size < 2*BLOCK_SIZE) {
-					__syncthreads();
-		    		break;
-		    	}			    
-			    if (t == 0) {
-			    	size = GRID_SIZE/block;
-			    	block *= BLOCK_SIZE;
-			    	middle[blockIdx.x] = private_w[0];
-			    }
+			// reduction part
+			for (int rstride = blockDim.x; rstride > 0; rstride >>= 1) {
+		    	if (t < rstride) {
+		    		private_w[t] += private_w[t+rstride];
+		    	}
 		    	__syncthreads();
+    		}
 
-			    // take another reduction on middle to compute final result.
-			    private_w[t] = (start+t < GRID_SIZE)? middle[start+t] : 0.0;
-			    private_w[t+blockDim.x] = (start+t+blockDim.x < GRID_SIZE)? middle[start+t+blockDim.x] : 0.0;
-			    __syncthreads();
+			if (n1 < 2*BLOCK_SIZE) {
+				if (start + t == 0) {
+		    		private_l2[j] += private_w[0];	
+		    	}
+		    	continue;
+	    	}	
+
+		    if (t == 0) {
+		    	middle[blockIdx.x] = private_w[0];
 		    }
+	    	__syncthreads();
+
+		    // take another reduction on middle to compute final result.
+		    private_w[t] = (start+t < GRID_SIZE)? middle[start+t] : 0.0;
+		    private_w[t+blockDim.x] = (start+t+blockDim.x < GRID_SIZE)? middle[start+t+blockDim.x] : 0.0;
+		    __syncthreads();
+
+		    for (int rstride = blockDim.x; rstride > 0; rstride >>= 1) {
+		    	if (t < rstride) {
+		    		private_w[t] += private_w[t+rstride];
+		    	}
+		    	__syncthreads();
+		    }
+		    
 		    // store into l2
 		    if (start + t == 0) {
-		    	l2[j] += private_w[0];	
+		    	private_l2[j] += private_w[0];	
 		    }
 		    __syncthreads();
 		}
 	}
 
 	if (start + t <= n2 && start + t > 0) {
-		l2[start+t] = squash(l2[start+t]);
-		printf("l2[%d] = %f\n", start+t, l2[start+t]);
+		l2[start+t] = squash(private_l2[start+t]);
+		// printf("l2[%d] = %f\n", start+t, l2[start+t]);
 	}
 
 }
 
+__global__ void bpnn_output_error_kernel(float *delta, float *target, float *output, 
+									int nj, float *err) {
+	int j;
+	float o, t, errsum;
+	if (threadIdx.x == 0) {
+		errsum = 0.0;
+		for (j = 1; j <= nj; j++) {
+			o = output[j];
+			t = target[j];
+			delta[j] = o * (1.0 - o) * (t - o);
+			errsum += ABS(delta[j]);
+		}
+		// *err = errsum;
+	}
+}
 
+__global__ void bpnn_hidden_error_kernel(float *delta_h, int nh, float *delta_o, int no, 
+						float *who, float *hidden, float *err) {
+	int k;
+	float sum;
+	int t = threadIdx.x;
+
+	__shared__ float h[BLOCK_SIZE], d_o[BLOCK_SIZE], errsum;
+
+	if (t == 0) {
+		errsum = 0.0;
+	}
+
+  	if (t > 0 && t <= no) {
+  		d_o[t] = delta_o[t];
+	}
+
+	__syncthreads();
+
+  	if (t <= nh) {
+	  	h[t] = hidden[t];
+	  	sum = 0.0;
+	  	for (k = 1; k <= no; ++k) {
+	  		sum += d_o[k] * who[t*(no+1)+k];
+	  	}
+  		delta_h[t] = h[t] * (1.0 - h[t]) * sum;
+  		// printf("hidden_delta[%d] = %f\n", t, delta_h[t]);
+  		atomicAdd(&errsum, ABS(delta_h[t]));
+  	}
+  	__syncthreads();
+
+  	if (t == 0) {
+  		// *err = errsum;
+  	}
+}	
+
+__global__ void bpnn_adjust_weights_kernel(float *delta, int ndelta, float *ly, 
+									int nly, float *w, float *oldw) {
+	
+	__shared__ float private_ly[BLOCK_SIZE*2], private_delta[16+1];
+	float new_dw;
+
+	int stride = 2 * blockDim.x * gridDim.x;
+	int start = 2 * blockDim.x * blockIdx.x;
+	int t = threadIdx.x;
+
+	// initialize shared memory
+	if (t == 0) {
+		ly[0] = 1.0;
+	}
+	if (start + t <= ndelta) {
+		private_delta[start+t] = delta[start+t];
+	}
+	__syncthreads();
+
+	for (int i = 0; i <= nly; i += stride) {
+		int k = i + start + t;
+		private_ly[t] = (k <= nly)? ly[k] : 0.0;
+		private_ly[t+blockDim.x] = (k+blockDim.x <= nly)? ly[k+blockDim.x] : 0.0;
+		__syncthreads();
+
+		for (int j = 1; j <= ndelta; ++j) {
+			int count = 0;
+			while (count < 2 && k <= nly) {
+				new_dw = ETA * private_delta[j] * private_ly[t] + MOMENTUM * oldw[k*(ndelta+1)+j];
+				w[k*(ndelta+1)+j] += new_dw;
+				oldw[k*(ndelta+1)+j] = new_dw;	
+				// printf("w[%d][%d] = %f\n", start+t, 0, w[k*(ndelta+1)+0]);	
+				// printf("w[%d][%d] = %f\n", start+t, j, w[k*(ndelta+1)+j]);	
+				k += blockDim.x;
+				count += 1;
+			}
+			__syncthreads();
+		}
+	}
+}
 
 
 void bpnn_train_kernel_device(int in_n, int hid_n, int out_n, float *input_units, float *hidden_units, 
@@ -93,14 +193,7 @@ void bpnn_train_kernel_device(int in_n, int hid_n, int out_n, float *input_units
 	float *middle;
 	cudaError_t cuda_ret;
 
-	printf("Performing GPU computation\n");
-
-	// cuda_ret = cudaMemset(&in, in_n, sizeof(int));
-	// if(cuda_ret != cudaSuccess) FATAL("Unable to set device memory");
-	// cuda_ret = cudaMemset(&hid, hid_n, sizeof(int));
-	// if(cuda_ret != cudaSuccess) FATAL("Unable to set device memory");
-	// cuda_ret = cudaMemset(&out, out_n, sizeof(int));
-	// if(cuda_ret != cudaSuccess) FATAL("Unable to set device memory");
+	printf("Performing GPU computation...");
 
 	cuda_ret = cudaMalloc((void**)&(middle), (GRID_SIZE)*sizeof(float));
     if(cuda_ret != cudaSuccess) FATAL("Unable to allocate device memory");
@@ -108,18 +201,15 @@ void bpnn_train_kernel_device(int in_n, int hid_n, int out_n, float *input_units
 	if(cuda_ret != cudaSuccess) FATAL("Unable to set device memory");
 
 	// dim3 grid_2d()
-	dim3 grid_in(GRID_SIZE, 1, 1);
-	dim3 block_in(BLOCK_SIZE, 1, 1);
+	dim3 grid(GRID_SIZE, 1, 1);
+	dim3 block(BLOCK_SIZE, 1, 1);
 
-	bpnn_layerforward_kernel<<<grid_in, block_in>>>(input_units, hidden_units, input_weights, middle, in_n, hid_n);
-	
-
-	// bpnn_layerforward(net->input_units, net->hidden_units,net->input_weights, in, hid);
-	// bpnn_layerforward(net->hidden_units, net->output_units, net->hidden_weights, hid, out);
-	// bpnn_output_error(net->output_delta, net->target, net->output_units, out, &out_err);
-	// bpnn_hidden_error(net->hidden_delta, hid, net->output_delta, out, net->hidden_weights, net->hidden_units, &hid_err);  
-	// bpnn_adjust_weights(net->output_delta, out, net->hidden_units, hid, net->hidden_weights, net->hidden_prev_weights);
-	// bpnn_adjust_weights(net->hidden_delta, hid, net->input_units, in, net->input_weights, net->input_prev_weights);
+	bpnn_layerforward_kernel<<<grid, block>>>(input_units, hidden_units, input_weights, middle, in_n, hid_n);
+	bpnn_layerforward_kernel<<<grid, block>>>(hidden_units, output_units, hidden_weights, middle, hid_n, out_n);
+	bpnn_output_error_kernel<<<1, BLOCK_SIZE>>>(output_delta, target, output_units, out_n, &out_err);
+	bpnn_hidden_error_kernel<<<1, BLOCK_SIZE>>>(hidden_delta, hid_n, output_delta, out_n, hidden_weights, hidden_units, &hid_err);
+	bpnn_adjust_weights_kernel<<<grid, block>>>(output_delta, out_n, hidden_units, hid_n, hidden_weights, hidden_prev_weights);
+	bpnn_adjust_weights_kernel<<<grid, block>>>(hidden_delta, hid_n, input_units, in_n, input_weights, input_prev_weights);
 }
 
 

@@ -16,13 +16,8 @@ int main(int argc, char* argv[])
     Timer timer;
 
     // Initialize host variables ----------------------------------------------
-
-    printf("\nSetting up the problem..."); fflush(stdout);
-    startTime(&timer);
-
     int layer_size, seed;
-    float out_err, hid_err;
-    BPNN *net_h, *net_d;
+    BPNN *net_h;
     cudaError_t cuda_ret;
 
     // device variables
@@ -38,9 +33,10 @@ int main(int argc, char* argv[])
 
     layer_size = atoi(argv[1]);
     seed = 7;
-    printf("Random number generator seed: %d\n", seed);
-    srand(seed);
+    bpnn_initialize(seed);
     
+    printf("Setting up the problem..."); fflush(stdout);
+    startTime(&timer);
     net_h = bpnn_create(layer_size, 16, 1); // (16, 1 can not be changed)
     load(net_h, layer_size);
     stopTime(&timer); printf("%f s\n", elapsedTime(timer));
@@ -126,33 +122,29 @@ int main(int argc, char* argv[])
     stopTime(&timer); printf("%f s\n", elapsedTime(timer));
     
     // Copy device variables from host ----------------------------------------
+    printf("Copying data from device to host..."); fflush(stdout);
+    startTime(&timer);
+    cuda_ret = cudaMemcpy(net_h->hidden_weights, hidden_weights_d, (hid+1)*(out+1)*sizeof(float), cudaMemcpyDeviceToHost);
+    if(cuda_ret != cudaSuccess) FATAL("Unable to copy memory to the host");
+    cudaDeviceSynchronize();
+    stopTime(&timer); printf("%f s\n", elapsedTime(timer));
+
     
-    // bpnn_save_dbg(net, "out.txt");
+    // Save results to file out_gpu.txt ----------------------------------------
+    const char *file_gpu = "out_gpu.txt";
+    bpnn_save_dbg(net_h, file_gpu);
+
+    // Verify correctness -----------------------------------------------------
+    // const chat *file_cpu = "../out.txt";
+    // compare_result(file_gpu, file_cpu);
+
+    // Free memory ------------------------------------------------------------
     bpnn_free(net_h);
-    printf("Training done\n");
-
-    // Copy device variables from host ----------------------------------------
-
- //    printf("Copying data from device to host..."); fflush(stdout);
- //    startTime(&timer);
-
- //    cuda_ret = cudaMemcpy(bins_h, bins_d, num_bins * sizeof(uint8_t),
- //        cudaMemcpyDeviceToHost);
-	// if(cuda_ret != cudaSuccess) FATAL("Unable to copy memory to host");
-
- //    cudaDeviceSynchronize();
- //    stopTime(&timer); printf("%f s\n", elapsedTime(timer));
-
- //    // Verify correctness -----------------------------------------------------
-
- //    printf("Verifying results..."); fflush(stdout);
-
- //    verify(in_h, bins_h, num_elements, num_bins);
-
- //    // Free memory ------------------------------------------------------------
-
- //    cudaFree(in_d); cudaFree(bins_d);
- //    free(in_h); free(bins_h);
+    cudaFree(input_units_d); cudaFree(hidden_units_d); cudaFree(output_units_d);
+    cudaFree(hidden_delta_d); cudaFree(output_delta_d); cudaFree(target_d);
+    cudaFree(input_weights_d); cudaFree(hidden_weights_d); 
+    cudaFree(input_prev_weights_d); cudaFree(hidden_prev_weights_d); 
+    printf("Training done!\n\n");
 
     return 0;
 }

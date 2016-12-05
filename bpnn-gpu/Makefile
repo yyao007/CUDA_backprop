@@ -2,7 +2,7 @@
 NVCC        = nvcc
 NVCC_FLAGS  = -O3 -I/usr/local/cuda/include -arch=sm_20
 LD_FLAGS    = -lcudart -L/usr/local/cuda/lib64
-EXE	        = histogram
+EXE	        = backprop_gpu
 OBJ	        = main.o support.o
 
 default: $(EXE)
@@ -17,4 +17,4 @@ $(EXE): $(OBJ)
 	$(NVCC) $(OBJ) -o $(EXE) $(LD_FLAGS)
 
 clean:
-	rm -rf *.o $(EXE)
+	rm -rf *.o $(EXE) *.txt

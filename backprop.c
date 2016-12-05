@@ -246,11 +246,9 @@ int n1, n2;
     /*** Compute weighted sum of its inputs ***/
     sum = 0.0;
     for (k = 0; k <= n1; k++) {	
-      printf("l1[%d] = %f\n", k, l1[k]); 
       sum += conn[k][j] * l1[k]; 
     }
     l2[j] = squash(sum);
-    printf("l2[%d] = %f\n", j, l2[j]);
   }
 }
 
@@ -490,3 +488,17 @@ char *filename;
 
   return (new);
 }
+
+void startTime(Timer* timer) {
+    gettimeofday(&(timer->startTime), NULL);
+}
+
+void stopTime(Timer* timer) {
+    gettimeofday(&(timer->endTime), NULL);
+}
+
+float elapsedTime(Timer timer) {
+    return ((float) ((timer.endTime.tv_sec - timer.startTime.tv_sec) \
+                + (timer.endTime.tv_usec - timer.startTime.tv_usec)/1.0e6));
+}
+

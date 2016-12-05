@@ -23,12 +23,12 @@ typedef struct {
 
   float *target;               /* storage for target vector */
 
-  float **input_weights;       /* weights from input to hidden layer */
-  float **hidden_weights;      /* weights from hidden to output layer */
+  float *input_weights;       /* weights from input to hidden layer */
+  float *hidden_weights;      /* weights from hidden to output layer */
 
                                 /*** The next two are for momentum ***/
-  float **input_prev_weights;  /* previous change on input to hidden wgt */
-  float **hidden_prev_weights; /* previous change on hidden to output wgt */
+  float *input_prev_weights;  /* previous change on input to hidden wgt */
+  float *hidden_prev_weights; /* previous change on hidden to output wgt */
 } BPNN;
 
 
@@ -42,6 +42,8 @@ void bpnn_copy_device(BPNN *, BPNN *, int, int, int);
 void bpnn_train_kernel_device1(BPNN *);
 void bpnn_train_kernel_device(BPNN *);
 void bpnn_free(BPNN *);
+void bpnn_save_dbg(BPNN *, const char *);
+void compare_result(const char *, const char *);
 
 void load(BPNN *, int);
 
@@ -53,8 +55,7 @@ typedef struct {
 #ifdef __cplusplus
 extern "C" {
 #endif
-void initVector(unsigned int **vec_h, unsigned int size, unsigned int num_bins);
-void verify(unsigned int* input, uint8_t* bins, unsigned int num_elements, unsigned int num_bins);
+
 void startTime(Timer* timer);
 void stopTime(Timer* timer);
 float elapsedTime(Timer timer);
